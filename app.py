@@ -1,0 +1,737 @@
+"""
+카카오톡 친구 자동 추가 웹 대시보드 v2.0
+작성자: 아리 (Claude Code)
+날짜: 2025-12-23 (v2.0 - 이미지 인식 통합)
+
+v2.0 변경사항:
+- 이미지 인식으로 '사람+' 아이콘 자동 검색
+- 창 활성화 강화 (Windows API 사용)
+- 매 작업 후 창 최상단 이동
+"""
+
+from flask import Flask, render_template, request, jsonify, Response
+from flask_cors import CORS
+import json
+import threading
+import time
+import csv
+import pyautogui
+import pyperclip
+import pygetwindow as gw
+import random
+import requests
+from io import StringIO
+import win32gui
+import win32con
+import os
+
+app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False  # 한글 인코딩 문제 해결
+CORS(app)
+
+# 서버 API 설정
+API_BASE_URL = "https://only-talk.kiam.kr/api"
+CONFIG_FILE = "onlytalk_config.json"
+
+# 구글 시트 설정 (기본값)
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1zDsFPQyrpSGiUvJ3eAqJyR5luwyecVohxKRdetGFGns/export?format=csv&gid=0"
+
+# 전역 변수
+current_task = None
+task_status = {
+    'running': False,
+    'current': 0,
+    'total': 0,
+    'logs': [],
+    'success_count': 0,
+    'fail_count': 0,
+    'sheet_url': GOOGLE_SHEET_URL,
+    'selected_addressbook': None,
+    'icon_found': False,  # v2.0: 아이콘 발견 여부
+    'icon_location': None  # v2.0: 아이콘 위치
+}
+
+# v2.0: 전역 변수 - 아이콘 위치
+ICON_LOCATION = None
+
+def load_config():
+    """설정 파일 로드"""
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def get_license_key():
+    """라이선스 키 가져오기"""
+    config = load_config()
+    return config.get('license_key', None)
+
+def log_message(message):
+    """로그 추가"""
+    task_status['logs'].append({
+        'time': time.strftime('%H:%M:%S'),
+        'message': message
+    })
+    # 최근 100개만 유지
+    if len(task_status['logs']) > 100:
+        task_status['logs'] = task_status['logs'][-100:]
+
+def read_friends_data(sheet_url=None):
+    """구글 시트에서 친구 데이터 읽기"""
+    if sheet_url is None:
+        sheet_url = GOOGLE_SHEET_URL
+
+    friends = []
+    try:
+        # 구글 시트에서 CSV 다운로드
+        log_message("📥 구글 시트에서 데이터 불러오는 중...")
+        response = requests.get(sheet_url, timeout=10)
+        response.raise_for_status()
+
+        # UTF-8 인코딩 명시
+        response.encoding = 'utf-8'
+
+        # CSV 파싱
+        csv_data = StringIO(response.text)
+        csv_reader = csv.reader(csv_data)
+
+        for row in csv_reader:
+            if len(row) >= 2:
+                name = row[0].strip()
+                phone = row[1].strip()
+                message = row[2].strip() if len(row) >= 3 else ""
+                friends.append({
+                    'name': name,
+                    'phone': phone,
+                    'message': message
+                })
+
+        log_message(f"✓ {len(friends)}명의 데이터 로드 완료")
+        return friends
+
+    except requests.exceptions.RequestException as e:
+        log_message(f"✗ 구글 시트 접근 실패: {e}")
+        # 로컬 CSV 파일 fallback
+        try:
+            log_message("📂 로컬 CSV 파일 시도...")
+            with open('kakao_friends_full.csv', 'r', encoding='utf-8') as f:
+                csv_reader = csv.reader(f)
+                for row in csv_reader:
+                    if len(row) >= 2:
+                        name = row[0].strip()
+                        phone = row[1].strip()
+                        message = row[2].strip() if len(row) >= 3 else ""
+                        friends.append({
+                            'name': name,
+                            'phone': phone,
+                            'message': message
+                        })
+            log_message(f"✓ 로컬 파일에서 {len(friends)}명 로드")
+            return friends
+        except FileNotFoundError:
+            log_message("✗ 로컬 CSV 파일도 없음")
+            return None
+    except Exception as e:
+        log_message(f"✗ 데이터 읽기 실패: {e}")
+        return None
+
+def find_main_kakao_window():
+    """메인 카카오톡 창 찾기"""
+    all_windows = gw.getAllWindows()
+    kakao_candidates = []
+
+    for window in all_windows:
+        title = window.title
+        if not title.strip():
+            continue
+
+        if '카카오톡' in title or 'KakaoTalk' in title or 'kakao' in title.lower():
+            is_main = (title == "카카오톡" or title == "KakaoTalk" or len(title) < 20)
+            kakao_candidates.append({
+                'window': window,
+                'title': title,
+                'is_main': is_main
+            })
+
+    if not kakao_candidates:
+        return None
+
+    for candidate in kakao_candidates:
+        if candidate['is_main']:
+            return candidate['window']
+
+    return kakao_candidates[0]['window']
+
+def activate_window(window, silent=False):
+    """
+    v2.0: 창을 최상단으로 강제로 가져옵니다 (Windows API 사용)
+
+    Args:
+        window: 활성화할 창
+        silent: True면 로그를 출력하지 않음
+    """
+    try:
+        # 최소화되어 있으면 복원
+        if window.isMinimized:
+            if not silent:
+                log_message("최소화된 창 복원 중...")
+            try:
+                hwnd = window._hWnd
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(1.0)
+            except:
+                pass
+
+        # 창 활성화 (여러 번 강력하게 시도)
+        if not silent:
+            log_message("창 활성화 시도 (5회 강력하게)...")
+        for i in range(5):
+            try:
+                window.activate()
+                time.sleep(0.3)
+            except:
+                pass
+
+        # 최상위로 올리기 (maximize/restore 트릭)
+        try:
+            window.maximize()
+            time.sleep(0.2)
+            window.restore()
+            time.sleep(0.3)
+        except:
+            pass
+
+        # 한 번 더 activate
+        try:
+            window.activate()
+            time.sleep(0.5)
+        except:
+            pass
+
+        # v2.0: 최상위 고정 시도 (Windows API 사용)
+        try:
+            hwnd = window._hWnd
+            win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                                 win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+            time.sleep(0.2)
+            win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                                 win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
+        except:
+            pass
+
+        # 최종 활성화
+        try:
+            window.activate()
+            time.sleep(1.0)
+        except:
+            pass
+
+        if not silent:
+            log_message("✓ 창 활성화 완료!")
+        return True
+
+    except Exception as e:
+        if not silent:
+            log_message(f"✗ 창 활성화 실패: {e}")
+        return False
+
+def find_person_plus_icon(window):
+    """
+    v2.0: 이미지 인식으로 '사람+' 아이콘의 위치를 찾습니다.
+
+    Returns:
+        dict: {'x': x좌표, 'y': y좌표, 'offset_x': 오프셋x, 'offset_y': 오프셋y, 'confidence': 신뢰도}
+        None: 찾지 못한 경우
+    """
+    log_message("🔍 '사람+' 아이콘 위치 찾기 (이미지 인식)")
+
+    icon_path = "person_plus_icon.png"
+
+    # 아이콘 파일 확인
+    if not os.path.exists(icon_path):
+        log_message(f"✗ 아이콘 파일이 없습니다: {icon_path}")
+        log_message(f"→ 기본 좌표 사용 (offset +450, +66)")
+        return None
+
+    log_message(f"✓ 아이콘 파일 발견: {icon_path}")
+
+    # 여러 confidence 값으로 시도
+    confidences = [0.9, 0.8, 0.7, 0.6]
+
+    log_message("이미지 인식 시작...")
+
+    for conf in confidences:
+        try:
+            log_message(f"  시도: confidence={conf*100:.0f}%")
+
+            location = pyautogui.locateOnScreen(icon_path, confidence=conf)
+
+            if location:
+                x, y = pyautogui.center(location)
+
+                offset_x = x - window.left
+                offset_y = y - window.top
+
+                log_message(f"✓ 아이콘 발견!")
+                log_message(f"  화면 좌표: ({x}, {y})")
+                log_message(f"  창 오프셋: (+{offset_x}, +{offset_y})")
+                log_message(f"  신뢰도: {conf*100:.0f}%")
+
+                return {
+                    'x': x,
+                    'y': y,
+                    'offset_x': offset_x,
+                    'offset_y': offset_y,
+                    'confidence': conf
+                }
+        except Exception as e:
+            # 파일 없음 에러가 아니면 로그 출력
+            if 'could not' not in str(e).lower() and 'file' not in str(e).lower():
+                log_message(f"  에러: {e}")
+
+    log_message("✗ 아이콘을 찾을 수 없습니다")
+    log_message("→ 기본 좌표 사용 (offset +450, +66)")
+    return None
+
+def add_friend_and_send_message(window, friend_data):
+    """
+    v2.0: 한 명의 친구 추가 및 메시지 전송 (이미지 인식 사용)
+    """
+    name = friend_data['name']
+    phone = friend_data['phone']
+    message = friend_data['message']
+
+    try:
+        global ICON_LOCATION
+
+        # 1. '사람+' 아이콘 클릭
+        # v2.0: 이미지 인식 결과 사용 (있으면)
+        if ICON_LOCATION:
+            x = window.left + ICON_LOCATION['offset_x']
+            y = window.top + ICON_LOCATION['offset_y']
+            log_message(f"  위치: 이미지 인식 (offset +{ICON_LOCATION['offset_x']}, +{ICON_LOCATION['offset_y']})")
+        else:
+            # 기본 좌표 사용
+            x = window.left + 450
+            y = window.top + 66
+            log_message(f"  위치: 기본 좌표 (offset +450, +66)")
+
+        pyautogui.click(x, y)
+        time.sleep(1.8)
+
+        # 2. 이름 붙여넣기
+        pyperclip.copy(name)
+        time.sleep(0.3)
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(0.8)
+
+        # 3. Tab 3회 → 폰번호 입력창
+        for i in range(3):
+            pyautogui.press('tab')
+            time.sleep(0.3)
+
+        # 4. 폰번호 붙여넣기
+        pyperclip.copy(phone)
+        time.sleep(0.3)
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(0.8)
+
+        # 5. Tab 1회 + Enter → 친구 등록
+        pyautogui.press('tab')
+        time.sleep(0.5)
+        pyautogui.press('enter')
+        time.sleep(2.0)
+
+        # 6. Enter → 일대일채팅 창 열기
+        pyautogui.press('enter')
+        time.sleep(2.5)
+
+        # 7. 메시지 전송 (있는 경우만)
+        try:
+            if message:
+                pyautogui.hotkey('alt', 'tab')
+                time.sleep(0.8)
+
+                pyperclip.copy(message)
+                time.sleep(0.3)
+                pyautogui.hotkey('ctrl', 'v')
+                time.sleep(1.0)
+
+                pyautogui.press('enter')
+                time.sleep(1.0)
+            else:
+                pyautogui.hotkey('alt', 'tab')
+                time.sleep(0.5)
+
+            # 8. 채팅창 닫기
+            pyautogui.press('esc')
+            time.sleep(1.0)
+
+            # v2.0: 9. 카톡 메인창을 다시 최상단으로
+            log_message("  카톡 메인창을 최상단으로 이동...")
+            activate_window(window, silent=True)
+            time.sleep(0.5)
+
+            return True
+
+        except Exception as e:
+            # 친구 추가 실패 케이스
+            for i in range(3):
+                pyautogui.press('esc')
+                time.sleep(0.5)
+
+            # v2.0: 실패해도 창 최상단으로
+            activate_window(window, silent=True)
+            time.sleep(0.5)
+
+            return False
+
+    except Exception as e:
+        log_message(f"✗ 에러: {e}")
+
+        # v2.0: 에러 시에도 창 최상단으로
+        try:
+            activate_window(window, silent=True)
+        except:
+            pass
+
+        return False
+
+def run_task(start, end, delay_min, delay_max):
+    """작업 실행"""
+    global task_status, ICON_LOCATION
+
+    task_status['running'] = True
+    task_status['current'] = 0
+    task_status['logs'] = []
+    task_status['success_count'] = 0
+    task_status['fail_count'] = 0
+
+    log_message("🚀 작업 시작!")
+
+    # 친구 데이터 읽기
+    friends = read_friends_data()
+    if not friends:
+        log_message("✗ 친구 데이터를 읽을 수 없습니다.")
+        task_status['running'] = False
+        return
+
+    friends_to_process = friends[start-1:end]
+    task_status['total'] = len(friends_to_process)
+
+    log_message(f"📋 {start}번부터 {end}번까지 총 {len(friends_to_process)}명 처리")
+
+    # 카톡 창 찾기
+    main_window = find_main_kakao_window()
+    if not main_window:
+        log_message("✗ 카카오톡 창을 찾을 수 없습니다!")
+        task_status['running'] = False
+        return
+
+    log_message(f"✓ 카톡 창 발견: {main_window.title}")
+
+    # 창 활성화
+    if not activate_window(main_window):
+        log_message("✗ 창 활성화 실패!")
+        task_status['running'] = False
+        return
+
+    log_message("✓ 창 활성화 완료!")
+
+    # v2.0: 이미지 인식으로 아이콘 위치 찾기
+    log_message("⚠️ 이미지 인식을 위해 카톡 창을 최상단으로 가져옵니다...")
+    activate_window(main_window, silent=True)
+    time.sleep(1.0)
+
+    ICON_LOCATION = find_person_plus_icon(main_window)
+
+    if ICON_LOCATION:
+        log_message(f"✓ 아이콘 위치 자동 검색 성공! (offset +{ICON_LOCATION['offset_x']}, +{ICON_LOCATION['offset_y']})")
+        task_status['icon_found'] = True
+        task_status['icon_location'] = ICON_LOCATION
+    else:
+        log_message(f"⚠ 아이콘 위치 자동 검색 실패, 기본 좌표 사용 (+450, +66)")
+        task_status['icon_found'] = False
+
+    # 3초 카운트다운
+    for i in range(3, 0, -1):
+        log_message(f"⏰ {i}초...")
+        time.sleep(1)
+
+    # v2.0: 작업 시작 전 창 최상단으로
+    log_message("카톡 창을 최상단으로 가져옵니다...")
+    activate_window(main_window, silent=True)
+    time.sleep(1.0)
+
+    # 친구 추가 시작
+    for i, friend in enumerate(friends_to_process, 1):
+        if not task_status['running']:  # 중단 체크
+            log_message("⚠️ 작업이 중단되었습니다.")
+            break
+
+        task_status['current'] = i
+        actual_number = start + i - 1
+
+        log_message(f"👤 [{i}/{len(friends_to_process)}] (번호: {actual_number}) {friend['name']}")
+
+        if add_friend_and_send_message(main_window, friend):
+            task_status['success_count'] += 1
+            log_message(f"✅ {friend['name']} 완료!")
+        else:
+            task_status['fail_count'] += 1
+            log_message(f"⚠️ {friend['name']} 실패")
+
+        # 랜덤 딜레이
+        if i < len(friends_to_process):
+            if delay_min == delay_max:
+                wait_time = delay_min
+            else:
+                wait_time = random.uniform(delay_min, delay_max)
+
+            log_message(f"⏰ {wait_time:.1f}초 대기...")
+            time.sleep(wait_time)
+
+    # 완료
+    log_message("=" * 40)
+    log_message("📊 작업 완료!")
+    log_message(f"✅ 성공: {task_status['success_count']}명")
+    log_message(f"❌ 실패: {task_status['fail_count']}명")
+    log_message("=" * 40)
+
+    task_status['running'] = False
+
+@app.route('/')
+def index():
+    """메인 페이지"""
+    return render_template('index.html')
+
+@app.route('/api/friends')
+def get_friends():
+    """친구 목록 조회"""
+    friends = read_friends_data()
+    if friends:
+        return jsonify({
+            'success': True,
+            'friends': friends,
+            'total': len(friends),
+            'sheet_url': task_status['sheet_url']
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'message': '구글 시트 또는 CSV 파일을 찾을 수 없습니다.'
+        })
+
+@app.route('/api/sheet-url', methods=['GET', 'POST'])
+def sheet_url():
+    """구글 시트 URL 조회/변경"""
+    global GOOGLE_SHEET_URL
+
+    if request.method == 'POST':
+        data = request.json
+        new_url = data.get('url', '')
+
+        if not new_url:
+            return jsonify({
+                'success': False,
+                'message': 'URL을 입력해주세요.'
+            })
+
+        # URL 유효성 검사
+        if 'docs.google.com/spreadsheets' not in new_url:
+            return jsonify({
+                'success': False,
+                'message': '올바른 구글 시트 URL이 아닙니다.'
+            })
+
+        # export URL로 변환
+        if '/edit' in new_url:
+            sheet_id = new_url.split('/d/')[1].split('/')[0]
+            new_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
+
+        GOOGLE_SHEET_URL = new_url
+        task_status['sheet_url'] = new_url
+
+        return jsonify({
+            'success': True,
+            'message': '구글 시트 URL이 업데이트되었습니다.',
+            'url': new_url
+        })
+    else:
+        return jsonify({
+            'success': True,
+            'url': task_status['sheet_url']
+        })
+
+@app.route('/api/addressbooks')
+def get_addressbooks():
+    """서버에서 주소록 목록 가져오기"""
+    license_key = get_license_key()
+
+    if not license_key:
+        return jsonify({
+            'success': False,
+            'message': '라이선스 키가 없습니다. 클라이언트를 다시 시작해주세요.'
+        })
+
+    try:
+        # 서버 API 호출
+        response = requests.get(
+            f"{API_BASE_URL}/accounts/addressbooks/",
+            headers={
+                'Authorization': f'Bearer {license_key}',
+                'Content-Type': 'application/json'
+            },
+            timeout=10,
+            verify=False
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # 배열로 변환
+            addressbooks = []
+            if isinstance(data, list):
+                addressbooks = data
+            elif isinstance(data, dict) and 'results' in data:
+                addressbooks = data['results']
+
+            return jsonify({
+                'success': True,
+                'addressbooks': addressbooks
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': f'서버 오류: {response.status_code}'
+            })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'오류: {str(e)}'
+        })
+
+@app.route('/api/select-addressbook', methods=['POST'])
+def select_addressbook():
+    """주소록 선택"""
+    global GOOGLE_SHEET_URL
+
+    data = request.json
+    addressbook_id = data.get('id')
+    google_sheet_url = data.get('google_sheet_url')
+    name = data.get('name')
+
+    if not google_sheet_url:
+        return jsonify({
+            'success': False,
+            'message': '주소록 URL이 없습니다.'
+        })
+
+    # export URL로 변환
+    if '/edit' in google_sheet_url:
+        sheet_id = google_sheet_url.split('/d/')[1].split('/')[0]
+        export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid=0"
+    else:
+        export_url = google_sheet_url
+
+    GOOGLE_SHEET_URL = export_url
+    task_status['sheet_url'] = export_url
+    task_status['selected_addressbook'] = {
+        'id': addressbook_id,
+        'name': name,
+        'url': google_sheet_url
+    }
+
+    return jsonify({
+        'success': True,
+        'message': f'주소록 "{name}"이 선택되었습니다.',
+        'export_url': export_url
+    })
+
+@app.route('/api/start', methods=['POST'])
+def start_task():
+    """작업 시작"""
+    global current_task
+
+    if task_status['running']:
+        return jsonify({
+            'success': False,
+            'message': '이미 작업이 실행 중입니다.'
+        })
+
+    data = request.json
+    start = int(data.get('start', 1))
+    end = int(data.get('end', 1))
+    delay_min = float(data.get('delay_min', 1.5))
+    delay_max = float(data.get('delay_max', 1.5))
+
+    # 백그라운드 스레드로 실행
+    current_task = threading.Thread(
+        target=run_task,
+        args=(start, end, delay_min, delay_max)
+    )
+    current_task.daemon = True
+    current_task.start()
+
+    return jsonify({
+        'success': True,
+        'message': '작업이 시작되었습니다.'
+    })
+
+@app.route('/api/stop', methods=['POST'])
+def stop_task():
+    """작업 중단"""
+    task_status['running'] = False
+    return jsonify({
+        'success': True,
+        'message': '작업 중단 요청이 접수되었습니다.'
+    })
+
+@app.route('/api/status')
+def get_status():
+    """작업 상태 조회"""
+    return jsonify(task_status)
+
+@app.route('/api/logs/stream')
+def stream_logs():
+    """실시간 로그 스트리밍"""
+    def generate():
+        last_log_count = 0
+        while True:
+            current_log_count = len(task_status['logs'])
+            if current_log_count > last_log_count:
+                # 새로운 로그만 전송
+                new_logs = task_status['logs'][last_log_count:]
+                for log in new_logs:
+                    yield f"data: {json.dumps(log)}\n\n"
+                last_log_count = current_log_count
+            time.sleep(0.5)
+
+    return Response(generate(), mimetype='text/event-stream')
+
+if __name__ == '__main__':
+    import sys
+    import io
+
+    # UTF-8 출력 설정 (Windows 인코딩 문제 해결)
+    if sys.platform == 'win32':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+    print("="*60)
+    print("  카카오톡 친구 자동 추가 웹 대시보드 v2.0")
+    print("="*60)
+    print("\nv2.0 변경사항:")
+    print("  - 이미지 인식으로 '사람+' 아이콘 자동 검색")
+    print("  - 창 활성화 강화 (Windows API 사용)")
+    print("  - 매 작업 후 창 최상단 이동")
+    print("\n🌐 서버 시작 중...")
+    print("\n접속 주소:")
+    print("  - 이 컴퓨터: http://localhost:5000")
+    print("  - 같은 네트워크: http://[내 IP]:5000")
+    print("\n⚠️  서버를 중단하려면 Ctrl+C를 누르세요.")
+    print("="*60)
+    print()
+
+    # 0.0.0.0으로 바인딩하면 외부에서도 접속 가능
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
