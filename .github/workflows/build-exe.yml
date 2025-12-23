@@ -51,48 +51,6 @@ jobs:
         Move-Item -Path "dist\OnlyTalk.exe" -Destination "dist\${{ env.RELEASE_NAME }}"
       shell: powershell
 
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ env.VERSION }}-${{ env.DATE }}
-        release_name: OnlyTalk ${{ env.VERSION }} (${{ env.DATE }})
-        draft: false
-        prerelease: false
-        body: |
-          ## OnlyTalk 클라이언트 ${{ env.VERSION }}
-
-          ### 새로운 기능
-          - 이미지 인식 기술로 '사람+' 아이콘 자동 검색
-          - Windows API를 사용한 강력한 창 활성화
-          - 매 작업 후 카카오톡 창 자동 최상단 이동
-          - 다양한 해상도 및 창 크기 지원
-
-          ### 설치 방법
-          1. OnlyTalkSetup-${{ env.DATE }}-${{ env.VERSION }}.exe 다운로드
-          2. 실행 후 지시에 따라 설치
-          3. 라이선스 키 입력
-
-          ### 시스템 요구사항
-          - Windows 10 이상
-          - Python 3.10 이상
-          - 카카오톡 (Windows용)
-
-          ---
-          🤖 Generated with Claude Code
-
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./dist/${{ env.RELEASE_NAME }}
-        asset_name: ${{ env.RELEASE_NAME }}
-        asset_content_type: application/octet-stream
-
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
