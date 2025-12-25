@@ -48,7 +48,7 @@ jobs:
 
     - name: Rename EXE
       run: |
-        Move-Item -Path "dist\OnlyTalk.exe" -Destination "dist${{ env.RELEASE_NAME }}"
+        Move-Item -Path "dist\OnlyTalk.exe" -Destination "dist\${{ env.RELEASE_NAME }}"
       shell: powershell
 
     - name: Upload artifact
