@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 # 설정
-API_BASE_URL = "https://onlytalk.kiam.kr/api"
+API_BASE_URL = "https://only-talk.kiam.kr/api"
 CONFIG_FILE = "onlytalk_config.json"
 
 class OnlyTalkClient:
@@ -143,7 +143,7 @@ class OnlyTalkClient:
 
         if not valid:
             print("\n✗ 라이선스 인증 실패!")
-            print("   https://onlytalk.kiam.kr 에서 라이선스를 구매하세요.")
+            print("   https://only-talk.kiam.kr 에서 라이선스를 구매하세요.")
             input("\nEnter를 눌러 종료...")
             return
 
@@ -180,11 +180,18 @@ class OnlyTalkClient:
         self.start_flask_server()
 
 if __name__ == "__main__":
-    # Windows 인코딩 설정
+    # Windows 인코딩 설정 (PyInstaller 호환)
     if sys.platform == 'win32':
-        import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+        try:
+            import io
+            # stdout/stderr가 None이 아닐 때만 설정
+            if hasattr(sys.stdout, 'buffer') and sys.stdout.buffer is not None:
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+            if hasattr(sys.stderr, 'buffer') and sys.stderr.buffer is not None:
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+        except (AttributeError, TypeError):
+            # PyInstaller로 빌드된 경우 무시
+            pass
 
     # SSL 경고 무시
     import urllib3
