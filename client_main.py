@@ -5,6 +5,7 @@ OnlyTalk Windows 클라이언트 (GUI 버전)
 
 서버 연동 버전 - 라이선스 검증 및 구글 시트 데이터 불러오기
 PyInstaller --windowed 호환
+v2.0.4: app.py 파일 경로 처리 개선
 """
 
 import sys
@@ -156,16 +157,26 @@ class OnlyTalkClient:
     def start_flask_server(self):
         """Flask 웹 서버 시작"""
         try:
+            # PyInstaller로 패키징된 경로 처리
+            if getattr(sys, 'frozen', False):
+                # PyInstaller로 실행 중
+                bundle_dir = getattr(sys, '_MEIPASS', os.path.abspath(os.path.dirname(__file__)))
+            else:
+                # 일반 Python 스크립트로 실행 중
+                bundle_dir = os.path.abspath(os.path.dirname(__file__))
+
+            app_py_path = os.path.join(bundle_dir, 'app.py')
+
             # app.py 파일 존재 확인
-            if not os.path.exists('app.py'):
+            if not os.path.exists(app_py_path):
                 self.show_message(
                     "오류",
-                    "app.py 파일을 찾을 수 없습니다.\n\n프로그램 폴더에 app.py가 있는지 확인하세요.\n\n현재 폴더: " + os.getcwd(),
+                    f"app.py 파일을 찾을 수 없습니다.\n\n프로그램 폴더: {bundle_dir}\n\n파일이 누락되었을 수 있습니다.",
                     'error'
                 )
                 return False
 
-            # Flask 서버 실행
+            # Flask 서버 실행 (bundle_dir에서 실행)
             if sys.platform == 'win32':
                 # Windows: 새 콘솔 창 숨김
                 startupinfo = subprocess.STARTUPINFO()
@@ -173,16 +184,18 @@ class OnlyTalkClient:
                 startupinfo.wShowWindow = subprocess.SW_HIDE
 
                 process = subprocess.Popen(
-                    [sys.executable, "app.py"],
+                    [sys.executable, app_py_path],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    cwd=bundle_dir,  # app.py가 있는 폴더에서 실행
                     startupinfo=startupinfo
                 )
             else:
                 process = subprocess.Popen(
-                    [sys.executable, "app.py"],
+                    [sys.executable, app_py_path],
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
+                    stderr=subprocess.PIPE,
+                    cwd=bundle_dir
                 )
 
             # Flask 서버 시작 대기 (최대 10초)

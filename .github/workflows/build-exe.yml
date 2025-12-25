@@ -31,7 +31,7 @@ jobs:
 
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name "OnlyTalk" --icon=person_plus_icon.png client_main.py
+        pyinstaller --onefile --windowed --name "OnlyTalk" --icon=person_plus_icon.png --add-data "app.py;." --add-data "templates;templates" client_main.py
 
     - name: Create version info
       run: |
@@ -48,7 +48,7 @@ jobs:
 
     - name: Rename EXE
       run: |
-        Move-Item -Path "dist\OnlyTalk.exe" -Destination "dist\${{ env.RELEASE_NAME }}"
+        Move-Item -Path "dist\OnlyTalk.exe" -Destination "dist${{ env.RELEASE_NAME }}"
       shell: powershell
 
     - name: Upload artifact
