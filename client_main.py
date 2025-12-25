@@ -16,11 +16,37 @@ import time
 import uuid
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox, simpledialog, scrolledtext
 
 # 설정
 API_BASE_URL = "https://only-talk.kiam.kr/api"
 CONFIG_FILE = "onlytalk_config.json"
+
+class LargeInputDialog(simpledialog.Dialog):
+    """큰 입력 대화상자 (커스텀)"""
+    def __init__(self, parent, title, prompt, initial=''):
+        self.prompt = prompt
+        self.initial = initial
+        self.result = None
+        super().__init__(parent, title)
+
+    def body(self, frame):
+        # 프롬프트 레이블
+        label = tk.Label(frame, text=self.prompt, justify=tk.LEFT)
+        label.grid(row=0, column=0, sticky=tk.W, padx=10, pady=10)
+
+        # 입력 필드 (크기 증가)
+        self.entry = tk.Entry(frame, width=60)  # 기본 30에서 60으로
+        self.entry.grid(row=1, column=0, padx=10, pady=10)
+        self.entry.insert(0, self.initial)
+
+        return self.entry
+
+    def apply(self):
+        self.result = self.entry.get()
+
+    def validate(self):
+        return True
 
 class OnlyTalkClient:
     def __init__(self):
@@ -41,15 +67,21 @@ class OnlyTalkClient:
     def load_config(self):
         """설정 파일 로드"""
         if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return {}
         return {}
 
     def save_config(self, config):
         """설정 파일 저장"""
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        self.config = config
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            self.config = config
+        except Exception as e:
+            self.show_message("오류", f"설정 저장 실패: {e}", 'error')
 
     def show_message(self, title, message, type='info'):
         """메시지 박스 표시"""
@@ -61,8 +93,9 @@ class OnlyTalkClient:
             messagebox.showwarning(title, message)
 
     def get_input(self, title, prompt, initial=''):
-        """입력 대화상자"""
-        return simpledialog.askstring(title, prompt, initialvalue=initial)
+        """큰 입력 대화상자"""
+        dialog = LargeInputDialog(self.root, title, prompt, initial)
+        return dialog.result
 
     def ask_yes_no(self, title, message):
         """예/아니오 대화상자"""
@@ -91,7 +124,7 @@ class OnlyTalkClient:
                 return False, None
 
         except requests.exceptions.RequestException as e:
-            self.show_message("네트워크 오류", f"서버 연결 실패: {e}", 'error')
+            self.show_message("네트워크 오류", f"서버 연결 실패:\n{e}", 'error')
             return False, None
 
     def download_google_sheet_data(self, sheet_url):
@@ -117,21 +150,84 @@ class OnlyTalkClient:
                 return False
 
         except Exception as e:
-            self.show_message("오류", f"구글 시트 다운로드 오류: {e}", 'error')
+            self.show_message("오류", f"구글 시트 다운로드 오류:\n{e}", 'error')
             return False
 
     def start_flask_server(self):
         """Flask 웹 서버 시작"""
-        # Flask 서버 실행
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        subprocess.Popen([sys.executable, "app.py"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=creationflags)
+        try:
+            # app.py 파일 존재 확인
+            if not os.path.exists('app.py'):
+                self.show_message(
+                    "오류",
+                    "app.py 파일을 찾을 수 없습니다.\n\n프로그램 폴더에 app.py가 있는지 확인하세요.\n\n현재 폴더: " + os.getcwd(),
+                    'error'
+                )
+                return False
 
-        # 브라우저 자동 실행
-        time.sleep(2)
-        os.system("start http://localhost:5000")
+            # Flask 서버 실행
+            if sys.platform == 'win32':
+                # Windows: 새 콘솔 창 숨김
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+
+                process = subprocess.Popen(
+                    [sys.executable, "app.py"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    startupinfo=startupinfo
+                )
+            else:
+                process = subprocess.Popen(
+                    [sys.executable, "app.py"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+
+            # Flask 서버 시작 대기 (최대 10초)
+            for i in range(10):
+                time.sleep(1)
+                try:
+                    response = requests.get("http://localhost:5000", timeout=1)
+                    if response.status_code == 200 or response.status_code == 404:
+                        # 서버 응답 있음
+                        return True
+                except:
+                    continue
+
+            # 10초 후에도 응답 없으면 에러 확인
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+                error_msg = stderr.decode('utf-8', errors='ignore')
+                if error_msg:
+                    self.show_message(
+                        "Flask 서버 오류",
+                        f"Flask 서버 시작 실패:\n\n{error_msg[:500]}",
+                        'error'
+                    )
+                else:
+                    self.show_message(
+                        "서버 시작 지연",
+                        "Flask 서버 시작이 지연되고 있습니다.\n잠시 후 수동으로 접속해보세요.\n\nhttp://localhost:5000",
+                        'warning'
+                    )
+            except:
+                self.show_message(
+                    "서버 확인 중",
+                    "Flask 서버가 백그라운드에서 시작 중입니다.\n잠시 후 브라우저에서 확인하세요.",
+                    'info'
+                )
+
+            return True
+
+        except Exception as e:
+            self.show_message(
+                "오류",
+                f"Flask 서버 시작 실패:\n\n{str(e)}",
+                'error'
+            )
+            return False
 
     def run(self):
         """메인 실행"""
@@ -200,7 +296,7 @@ class OnlyTalkClient:
                 ):
                     sheet_url = self.get_input(
                         "구글 시트 URL",
-                        "구글 시트 URL을 입력하세요:",
+                        "구글 시트 공유 URL을 입력하세요:\n(예: https://docs.google.com/spreadsheets/d/...)",
                         ""
                     )
                     if sheet_url:
@@ -212,14 +308,24 @@ class OnlyTalkClient:
                 self.download_google_sheet_data(self.config['google_sheet_url'])
 
             # 6. Flask 웹 대시보드 실행
-            self.show_message(
-                "OnlyTalk 시작",
-                "웹 대시보드가 자동으로 열립니다.\n\n주소: http://localhost:5000\n\n종료하려면 시스템 트레이에서\nPython 프로세스를 종료하세요."
-            )
-            self.start_flask_server()
+            if self.start_flask_server():
+                # 서버 시작 성공 시 브라우저 열기
+                time.sleep(2)
+                os.system("start http://localhost:5000")
+
+                self.show_message(
+                    "OnlyTalk 시작 완료",
+                    "웹 대시보드가 열렸습니다.\n\n주소: http://localhost:5000\n\n종료하려면 작업 관리자에서\nPython 프로세스를 종료하세요."
+                )
 
         except Exception as e:
-            self.show_message("오류", f"프로그램 실행 중 오류 발생:\n{str(e)}", 'error')
+            import traceback
+            error_detail = traceback.format_exc()
+            self.show_message(
+                "오류",
+                f"프로그램 실행 중 오류 발생:\n\n{str(e)}\n\n상세 정보:\n{error_detail[:300]}",
+                'error'
+            )
         finally:
             # Tkinter 종료
             try:
