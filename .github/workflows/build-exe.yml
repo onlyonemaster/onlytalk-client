@@ -29,9 +29,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller requests flask flask-cors pyautogui pyperclip pygetwindow pywin32 opencv-python numpy
 
-    - name: Build EXE with PyInstaller
+    - name: Build EXE with PyInstaller (onedir mode)
       run: |
-        pyinstaller --onefile --windowed --name "OnlyTalk" --icon=person_plus_icon.png --add-data "app.py;." --add-data "templates;templates" client_main.py
+        pyinstaller --onedir --windowed --name "OnlyTalk" --icon=person_plus_icon.png --add-data "app.py;." --add-data "templates;templates" --add-data "person_plus_icon.png;." client_main.py
 
     - name: Create version info
       run: |
@@ -40,19 +40,24 @@ jobs:
         if ($version -eq "") {
           $version = $env:GITHUB_REF_NAME
         }
-        $filename = "OnlyTalkSetup-$date-$version.exe"
-        echo "RELEASE_NAME=$filename" >> $env:GITHUB_ENV
+        $foldername = "OnlyTalkSetup-$date-$version"
+        echo "RELEASE_NAME=$foldername" >> $env:GITHUB_ENV
         echo "VERSION=$version" >> $env:GITHUB_ENV
         echo "DATE=$date" >> $env:GITHUB_ENV
       shell: powershell
 
-    - name: Rename EXE
+    - name: Rename folder
       run: |
-        Move-Item -Path "dist\OnlyTalk.exe" -Destination "dist\${{ env.RELEASE_NAME }}"
+        Move-Item -Path "dist\OnlyTalk" -Destination "dist\${{ env.RELEASE_NAME }}"
+      shell: powershell
+
+    - name: Create ZIP archive
+      run: |
+        Compress-Archive -Path "dist\${{ env.RELEASE_NAME }}" -DestinationPath "dist\${{ env.RELEASE_NAME }}.zip"
       shell: powershell
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: onlytalk-exe
-        path: ./dist/${{ env.RELEASE_NAME }}
+        path: ./dist/${{ env.RELEASE_NAME }}.zip
