@@ -4,7 +4,7 @@ Flask app and HTML template fully integrated into single file
 
 Changes:
 - Integrated Flask routes from app.py into client_main.py
-- Embedded HTML template using render_template_string
+- Embedded HTML template using render_template_string with raw string
 - PyInstaller --onefile mode for single EXE deployment
 """
 import sys
@@ -36,8 +36,8 @@ import numpy as np
 API_BASE_URL = "https://only-talk.kiam.kr/api"
 CONFIG_FILE = "onlytalk_config.json"
 
-# HTML Template
-HTML_TEMPLATE = """<!DOCTYPE html>
+# HTML Template (raw string to preserve backslashes)
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -796,16 +796,6 @@ flask_app = Flask(__name__)
 flask_app.config['JSON_AS_ASCII'] = False
 CORS(flask_app)
 
-# 한글 인코딩 문제 해결
-CORS(app)
-
-# 서버 API 설정
-API_BASE_URL = "https://only-talk.kiam.kr/api"
-CONFIG_FILE = "onlytalk_config.json"
-
-# 구글 시트 설정 (기본값)
-GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1zDsFPQyrpSGiUvJ3eAqJyR5luwyecVohxKRdetGFGns/export?format=csv&gid=0"
-
 # 전역 변수
 current_task = None
 task_status = {
@@ -825,16 +815,19 @@ task_status = {
 ICON_LOCATION = None
 
 def load_config():
+    """설정 파일 로드"""
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r') as f:
             return json.load(f)
     return {}
 
 def get_license_key():
+    """라이선스 키 가져오기"""
     config = load_config()
     return config.get('license_key', None)
 
 def log_message(message):
+    """로그 추가"""
     task_status['logs'].append({
         'time': time.strftime('%H:%M:%S'),
         'message': message
@@ -844,6 +837,7 @@ def log_message(message):
         task_status['logs'] = task_status['logs'][-100:]
 
 def read_friends_data(sheet_url=None):
+    """구글 시트에서 친구 데이터 읽기"""
     if sheet_url is None:
         sheet_url = GOOGLE_SHEET_URL
 
@@ -902,6 +896,7 @@ def read_friends_data(sheet_url=None):
         return None
 
 def find_main_kakao_window():
+    """메인 카카오톡 창 찾기"""
     all_windows = gw.getAllWindows()
     kakao_candidates = []
 
@@ -928,11 +923,13 @@ def find_main_kakao_window():
     return kakao_candidates[0]['window']
 
 def activate_window(window, silent=False):
+    """
     v2.0: 창을 최상단으로 강제로 가져옵니다 (Windows API 사용)
 
     Args:
         window: 활성화할 창
         silent: True면 로그를 출력하지 않음
+    """
     try:
         # 최소화되어 있으면 복원
         if window.isMinimized:
@@ -999,11 +996,13 @@ def activate_window(window, silent=False):
         return False
 
 def find_person_plus_icon(window):
+    """
     v2.0: 이미지 인식으로 '사람+' 아이콘의 위치를 찾습니다.
 
     Returns:
         dict: {'x': x좌표, 'y': y좌표, 'offset_x': 오프셋x, 'offset_y': 오프셋y, 'confidence': 신뢰도}
         None: 찾지 못한 경우
+    """
     log_message("🔍 '사람+' 아이콘 위치 찾기 (이미지 인식)")
 
     icon_path = "person_plus_icon.png"
@@ -1055,7 +1054,9 @@ def find_person_plus_icon(window):
     return None
 
 def add_friend_and_send_message(window, friend_data):
+    """
     v2.0: 한 명의 친구 추가 및 메시지 전송 (이미지 인식 사용)
+    """
     name = friend_data['name']
     phone = friend_data['phone']
     message = friend_data['message']
@@ -1157,6 +1158,7 @@ def add_friend_and_send_message(window, friend_data):
         return False
 
 def run_task(start, end, delay_min, delay_max):
+    """작업 실행"""
     global task_status, ICON_LOCATION
 
     task_status['running'] = True
@@ -1260,10 +1262,12 @@ def run_task(start, end, delay_min, delay_max):
 
 @flask_app.route('/')
 def index():
+    """메인 페이지"""
     return render_template('index.html')
 
 @flask_app.route('/api/friends')
 def get_friends():
+    """친구 목록 조회"""
     friends = read_friends_data()
     if friends:
         return jsonify({
@@ -1280,6 +1284,7 @@ def get_friends():
 
 @flask_app.route('/api/sheet-url', methods=['GET', 'POST'])
 def sheet_url():
+    """구글 시트 URL 조회/변경"""
     global GOOGLE_SHEET_URL
 
     if request.method == 'POST':
@@ -1320,6 +1325,7 @@ def sheet_url():
 
 @flask_app.route('/api/addressbooks')
 def get_addressbooks():
+    """서버에서 주소록 목록 가져오기"""
     license_key = get_license_key()
 
     if not license_key:
@@ -1368,6 +1374,7 @@ def get_addressbooks():
 
 @flask_app.route('/api/select-addressbook', methods=['POST'])
 def select_addressbook():
+    """주소록 선택"""
     global GOOGLE_SHEET_URL
 
     data = request.json
@@ -1404,6 +1411,7 @@ def select_addressbook():
 
 @flask_app.route('/api/start', methods=['POST'])
 def start_task():
+    """작업 시작"""
     global current_task
 
     if task_status['running']:
@@ -1433,6 +1441,7 @@ def start_task():
 
 @flask_app.route('/api/stop', methods=['POST'])
 def stop_task():
+    """작업 중단"""
     task_status['running'] = False
     return jsonify({
         'success': True,
@@ -1441,10 +1450,12 @@ def stop_task():
 
 @flask_app.route('/api/status')
 def get_status():
+    """작업 상태 조회"""
     return jsonify(task_status)
 
 @flask_app.route('/api/logs/stream')
 def stream_logs():
+    """실시간 로그 스트리밍"""
     def generate():
         last_log_count = 0
         while True:
